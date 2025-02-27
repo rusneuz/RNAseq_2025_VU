@@ -1,0 +1,118 @@
+
+import os
+
+samples = ["SRR15618897", "SRR15618896", "SRR15618895", "SRR15618894", "SRR15618893", "SRR15618892", "SRR15618891", "SRR15618890", "SRR15618889", "SRR15618888", "SRR15618887", "SRR15618886"]
+
+input_path="/home/bda/raw_data_exercise_20250220"
+
+genome_index_dir = "/home/shared/raw_data_exercise_20250220/mouse_reference/grcm38/genome"
+
+stages = ["raw", "filtered"]
+
+# The 'all' rule defines the final targets of your pipeline
+rule all:
+   input:
+        # expand("results/fastqc/{sample}_{stage}_fastqc.html", 
+        #     sample=samples,
+        #     stage=stages),
+        # expand("results/fastp/{sample}_fastp.html", sample=samples),
+        # expand("results/hisat2/{sample}.bam", sample=samples),
+        # expand("results/hisat2/{sample}.sorted.bam", sample=samples),
+        # expand("results/hisat2/{sample}.sorted.bam.bai", sample=samples),
+        "results/multiqc/multiqc_report.html",
+
+# Rule to run FastQC on each sample
+rule fastqc:
+   input:
+       expand("{path}/{{sample}}_{{stage}}.fastq", path=input_path)
+   output:
+       html = "results/fastqc/{sample}_{stage}_fastqc.html",
+       zip  = "results/fastqc/{sample}_{stage}_fastqc.zip"
+   conda: "envs/preprocess_rnaseq.yaml"
+   shell:
+       """
+           fastqc {input} --outdir results/fastqc
+       """
+
+rule fastp:
+    input: 
+        expand("{path}/{{sample}}_raw.fastq", path=input_path)
+    output:
+        filtered = expand("{path}/{{sample}}_filtered.fastq", path=input_path),
+        html = "results/fastp/{sample}_fastp.html",
+        json = "results/fastp/{sample}_fastp.json"
+    conda: "envs/preprocess_rnaseq.yaml"
+    params:
+        quality = 25,
+    shell:
+        """
+        fastp -i {input} \
+        -q {params.quality} \
+        --trim_poly_g \
+        --trim_poly_x \
+        -o {output.filtered} \
+        -h {output.html} \
+        -j {output.json}
+        """
+        
+rule hisat2:
+    input:
+        fastq=expand("{path}/{{sample}}_filtered.fastq", path=input_path)
+    output:
+        sam="results/hisat2/{sample}.sam",
+        bam="results/hisat2/{sample}.bam",
+        summary="results/hisat2/{sample}_summary.txt"
+    params:
+        index=genome_index_dir 
+    conda: "envs/preprocess_rnaseq.yaml"
+    threads: 2
+    shell:
+        """
+       echo "Running HISAT2 with index {params.index}"
+       hisat2 -p {threads} -x {params.index} -U {input.fastq} --new-summary --summary-file {output.summary} -S {output.sam}
+       
+       echo "Converting SAM to BAM..."
+       samtools view -bS {output.sam} > {output.bam}
+
+       echo "HISAT2 finished for {input.fastq}"
+       """
+
+rule sort_bam:
+   input:
+       unsorted_bam="results/hisat2/{sample}.bam"
+   output:
+       sorted_bam="results/hisat2/{sample}.sorted.bam"
+   threads: 4
+   conda: "envs/preprocess_rnaseq.yaml"
+   shell:
+       """
+           samtools sort -@ {threads} -o {output.sorted_bam} {input.unsorted_bam}
+       """
+  
+rule index_bam:
+   input:
+       sorted_bam="results/hisat2/{sample}.sorted.bam"
+   output:
+       bam_index="results/hisat2/{sample}.sorted.bam.bai"
+   conda: "envs/preprocess_rnaseq.yaml"
+   shell:
+       """
+           samtools index {input.sorted_bam}
+       """
+
+rule multiqc:
+    input:
+        expand("results/fastqc/{sample}_{stage}_fastqc.zip", sample=samples, stage=stages),
+        expand("results/fastp/{sample}_fastp.json", sample=samples),
+        expand("results/hisat2/{sample}_summary.txt", sample=samples),
+    output:
+        "results/multiqc/multiqc_report.html",
+        directory("results/multiqc/multiqc_data")
+    params:
+        extra="--verbose",  # Optional: extra parameters for multiqc.
+        use_input_files_only=True,  # Optional, use only a.txt and don't search folder samtools_stats for files
+    log:
+        "logs/multiqc.log",
+    wrapper:
+        "v5.8.0/bio/multiqc"
+
